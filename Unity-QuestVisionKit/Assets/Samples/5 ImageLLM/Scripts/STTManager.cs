@@ -7,6 +7,7 @@ using UnityEngine.Events;
 using System.Threading.Tasks;
 using UnityEngine.Networking;
 using System.Collections.Generic;
+using System.Collections;
 
 namespace QuestCameraKit.OpenAI
 {
@@ -184,50 +185,63 @@ namespace QuestCameraKit.OpenAI
             OnTranscriptionComplete?.Invoke(transcription);
         }
 
-        private async Task<string> SendToOpenAI(byte[] audioData)
+        private Task<string> SendToOpenAI(byte[] audioData)
+        {
+            var tcs = new System.Threading.Tasks.TaskCompletionSource<string>();
+            StartCoroutine(SendToOpenAICoroutine(audioData, res => tcs.SetResult(res)));
+            return tcs.Task;
+        }
+
+        public IEnumerator SendToOpenAICoroutine(byte[] audioData, Action<string> onDone)
         {
             var url = "https://api.openai.com/v1/audio/transcriptions";
 
             if (audioData == null || audioData.Length == 0)
             {
                 Debug.LogError("SendToOpenAI: Audio data is empty or null.");
-                return "Error: Audio file is empty.";
+                onDone?.Invoke("Error: Audio file is empty.");
+                yield break;
             }
 
             if (audioData.Length > 25 * 1024 * 1024)
             {
                 Debug.LogError("SendToOpenAI: Audio file is too large.");
-                return "Error: File too large.";
+                onDone?.Invoke("Error: File too large.");
+                yield break;
             }
 
-            var filePath = Path.Combine(Application.persistentDataPath, FileName);
-            await File.WriteAllBytesAsync(filePath, audioData);
-
-            using var request = UnityWebRequest.PostWwwForm(url, "POST");
-            request.SetRequestHeader("Authorization", "Bearer " + _apiKey);
-
-            var formData = new List<IMultipartFormSection>
+            try
             {
-                new MultipartFormFileSection("file", audioData, FileName, "audio/wav"),
-                new MultipartFormDataSection("model", "whisper-1")
-            };
+                var filePath = Path.Combine(Application.persistentDataPath, FileName);
+                File.WriteAllBytes(filePath, audioData);
+            }
+            catch (Exception e)
+            {
+                Debug.LogError("SendToOpenAI: Failed to write file: " + e);
+                onDone?.Invoke("Error: Failed to write file.");
+                yield break;
+            }
 
-            var boundary = UnityWebRequest.GenerateBoundary();
-            var formDataBytes = UnityWebRequest.SerializeFormSections(formData, boundary);
+            var form = new WWWForm();
+            form.AddBinaryData("file", audioData, FileName, "audio/wav");
+            form.AddField("model", "whisper-1");
 
-            request.uploadHandler = new UploadHandlerRaw(formDataBytes);
-            request.downloadHandler = new DownloadHandlerBuffer();
-            request.SetRequestHeader("Content-Type",
-                "multipart/form-data; boundary=" + System.Text.Encoding.UTF8.GetString(boundary));
+            using (var request = UnityWebRequest.Post(url, form))
+            {
+                request.SetRequestHeader("Authorization", "Bearer " + _apiKey);
 
-            await request.SendWebRequest();
+                yield return request.SendWebRequest();
 
-            if (request.result != UnityWebRequest.Result.ConnectionError &&
-                request.result != UnityWebRequest.Result.ProtocolError)
-                return request.downloadHandler.text;
-
-            Debug.LogError("OpenAI API Error: " + request.error + "\nResponse: " + request.downloadHandler.text);
-            return "Error: " + request.downloadHandler.text;
+                if (request.result == UnityWebRequest.Result.Success)
+                {
+                    onDone?.Invoke(request.downloadHandler.text);
+                }
+                else
+                {
+                    Debug.LogError("OpenAI API Error: " + request.error + "\nResponse: " + request.downloadHandler.text);
+                    onDone?.Invoke("Error: " + request.downloadHandler.text);
+                }
+            }
         }
 
         private void Update()
